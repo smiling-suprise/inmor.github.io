@@ -1020,42 +1020,81 @@
             }
         }
         
-        /* 新增：优化视频播放的CSS */
-        .video-container video,
-        .light-video-container video {
-            will-change: transform;
-            -webkit-backface-visibility: hidden;
-            backface-visibility: hidden;
-            -webkit-transform: translateZ(0);
-            transform: translateZ(0);
+        /* 新增：加载进度条样式 */
+        .loading-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            transition: opacity 0.5s ease;
         }
         
-        /* 新增：视频缓冲提示 */
-        .video-buffering {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+        .loading-container.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        .loading-text {
             color: white;
-            font-size: 18px;
-            background: rgba(0, 0, 0, 0.7);
-            padding: 10px 20px;
+            font-size: min(24px, 5vw);
+            margin-bottom: 20px;
+            font-family: 'Ma Shan Zheng', cursive;
+            text-align: center;
+        }
+        
+        .loading-progress {
+            width: min(300px, 80vw);
+            height: 20px;
+            background: rgba(255, 255, 255, 0.2);
             border-radius: 10px;
-            display: none;
-            z-index: 26;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        
+        .loading-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #e74c3c, #f1c40f, #2ecc71);
+            width: 0%;
+            transition: width 0.3s ease;
+            border-radius: 10px;
+        }
+        
+        .loading-details {
+            color: rgba(255, 255, 255, 0.7);
+            font-size: min(16px, 3.5vw);
+            text-align: center;
+            margin-top: 10px;
             font-family: 'Ma Shan Zheng', cursive;
         }
         
-        .video-buffering.show {
-            display: block;
+        /* 调整蛋糕位置，让它更靠下 */
+        .cake-container {
+            top: 60% !important; /* 调整这里，使蛋糕更靠下 */
+        }
+        
+        .cake-instruction {
+            top: calc(70% + min(250px, 45vw)) !important; /* 相应调整提示位置 */
         }
     </style>
 </head>
 <body>
+    <!-- 新增：加载进度容器 -->
+    <div class="loading-container" id="loadingContainer">
+        <div class="loading-text">正在加载惊喜...</div>
+        <div class="loading-progress">
+            <div class="loading-progress-bar" id="loadingProgressBar"></div>
+        </div>
+        <div class="loading-details" id="loadingDetails">准备播放视频 0/26</div>
+    </div>
+    
     <div class="container">
-        <!-- 新增：视频缓冲提示 -->
-        <div class="video-buffering" id="videoBuffering">视频加载中...</div>
-        
         <div class="gift-box" id="giftBox">
             <div class="box">
                 <div class="lid"></div>
@@ -1184,7 +1223,9 @@
             const cancelSound = document.getElementById('cancelSound');
             const birthdayMusic = document.getElementById('birthdayMusic');
             const callMusic = document.getElementById('callMusic');
-            const videoBuffering = document.getElementById('videoBuffering');
+            const loadingContainer = document.getElementById('loadingContainer');
+            const loadingProgressBar = document.getElementById('loadingProgressBar');
+            const loadingDetails = document.getElementById('loadingDetails');
             
             const videoCallContainer = document.getElementById('videoCallContainer');
             const answerBtn = document.getElementById('answerBtn');
@@ -1194,10 +1235,9 @@
             let audioInitialized = false;
             let isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
             
-            // 优化的视频缓存管理
+            // 视频缓存管理
             const videoCache = new Map();
-            const videoLoadPromises = new Map(); // 存储视频加载Promise
-            
+            const videoLoadPromises = [];
             const videoUrls = [
                 "视频/IMG_0005.Mp4",
                 "视频/IMG_4326.MP4",
@@ -1230,11 +1270,12 @@
                 "视频/IMG_3917.MP4"
             ];
             
+            // 合并所有视频URL
+            const allVideoUrls = [...videoUrls, ...specialVideoUrls];
             let currentVideoIndex = 0;
             let currentSpecialVideoIndex = 0;
-            let isPlayingVideos = false;
-            let preloadedVideos = 0;
-            const MAX_PRELOAD = 5; // 最多预加载5个视频
+            let videosLoaded = 0;
+            let totalVideos = allVideoUrls.length;
           
             // 调整音频平衡
             backgroundMusic.volume = 0.08;
@@ -1299,88 +1340,103 @@
                 }
             }
             
-            // 优化的视频预加载函数
-            async function preloadVideo(url) {
-                if (videoCache.has(url)) {
-                    return videoCache.get(url);
-                }
-                
-                // 如果已经在加载中，返回加载Promise
-                if (videoLoadPromises.has(url)) {
-                    return videoLoadPromises.get(url);
-                }
-                
-                console.log('开始预加载视频:', url);
-                
-                const loadPromise = new Promise((resolve, reject) => {
+            // 预加载单个视频
+            function preloadVideo(url, index) {
+                return new Promise((resolve, reject) => {
+                    // 检查是否已经缓存
+                    if (videoCache.has(url)) {
+                        videosLoaded++;
+                        updateLoadingProgress();
+                        resolve(videoCache.get(url));
+                        return;
+                    }
+                    
                     const video = document.createElement('video');
                     video.preload = 'auto';
                     video.muted = true; // 静音预加载，减少带宽
                     video.style.display = 'none';
                     
-                    video.addEventListener('loadeddata', () => {
-                        console.log('视频预加载完成:', url);
+                    const onLoaded = () => {
+                        console.log(`视频 ${index + 1}/${totalVideos} 预加载完成: ${url}`);
                         videoCache.set(url, video);
-                        videoLoadPromises.delete(url);
-                        preloadedVideos++;
+                        videosLoaded++;
+                        updateLoadingProgress();
+                        video.removeEventListener('loadeddata', onLoaded);
+                        video.removeEventListener('error', onError);
                         resolve(video);
-                    }, { once: true });
+                    };
                     
-                    video.addEventListener('error', (e) => {
-                        console.log('视频预加载失败:', url, e);
-                        videoLoadPromises.delete(url);
-                        reject(new Error(`视频加载失败: ${url}`));
-                    }, { once: true });
+                    const onError = (e) => {
+                        console.log(`视频 ${index + 1}/${totalVideos} 预加载失败: ${url}`, e);
+                        videosLoaded++;
+                        updateLoadingProgress();
+                        video.removeEventListener('loadeddata', onLoaded);
+                        video.removeEventListener('error', onError);
+                        // 即使失败也继续，但记录错误
+                        resolve(null);
+                    };
+                    
+                    video.addEventListener('loadeddata', onLoaded, { once: true });
+                    video.addEventListener('error', onError, { once: true });
                     
                     // 设置超时
-                    setTimeout(() => {
-                        if (!videoCache.has(url)) {
-                            console.log('视频预加载超时:', url);
-                            videoLoadPromises.delete(url);
-                            reject(new Error(`视频加载超时: ${url}`));
-                        }
-                    }, 15000); // 15秒超时
+                    const timeoutId = setTimeout(() => {
+                        console.log(`视频 ${index + 1}/${totalVideos} 预加载超时: ${url}`);
+                        videosLoaded++;
+                        updateLoadingProgress();
+                        video.removeEventListener('loadeddata', onLoaded);
+                        video.removeEventListener('error', onError);
+                        // 即使超时也继续，但记录
+                        resolve(null);
+                    }, 5000); // 5秒超时，如果网速慢可以适当延长
+                    
+                    video.addEventListener('loadeddata', () => {
+                        clearTimeout(timeoutId);
+                    }, { once: true });
                     
                     video.src = url;
                     document.body.appendChild(video);
                     video.load();
-                    
-                    videoLoadPromises.set(url, loadPromise);
                 });
-                
-                return loadPromise;
             }
             
-            // 批量预加载视频
-            async function preloadVideosBatch(startIndex, count) {
-                const videosToPreload = [];
-                for (let i = startIndex; i < Math.min(startIndex + count, videoUrls.length); i++) {
-                    videosToPreload.push(preloadVideo(videoUrls[i]));
+            // 批量预加载所有视频
+            async function preloadAllVideos() {
+                console.log(`开始预加载 ${totalVideos} 个视频...`);
+                
+                // 分批预加载，避免一次性加载太多
+                const batchSize = 3; // 每次预加载3个视频
+                for (let i = 0; i < totalVideos; i += batchSize) {
+                    const batch = allVideoUrls.slice(i, i + batchSize);
+                    const batchPromises = batch.map((url, idx) => 
+                        preloadVideo(url, i + idx)
+                    );
+                    
+                    await Promise.all(batchPromises);
+                    
+                    // 每批加载完成后稍作延迟
+                    if (i + batchSize < totalVideos) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
                 }
                 
-                // 预加载特殊视频
-                for (const url of specialVideoUrls) {
-                    videosToPreload.push(preloadVideo(url));
-                }
-                
-                try {
-                    await Promise.all(videosToPreload);
-                    console.log('批量预加载完成');
-                } catch (error) {
-                    console.log('部分视频预加载失败:', error);
-                }
+                console.log(`所有视频预加载完成 (${videosLoaded}/${totalVideos})`);
+                return videosLoaded;
             }
             
-            // 智能预加载下一个视频
-            function preloadNextVideo() {
-                if (currentVideoIndex + 1 < videoUrls.length && !videoCache.has(videoUrls[currentVideoIndex + 1])) {
-                    preloadVideo(videoUrls[currentVideoIndex + 1]).catch(() => {
-                        console.log('预加载下一个视频失败，但继续播放');
-                    });
-                }
+            // 更新加载进度
+            function updateLoadingProgress() {
+                const progress = Math.round((videosLoaded / totalVideos) * 100);
+                loadingProgressBar.style.width = progress + '%';
+                loadingDetails.textContent = `准备播放视频 ${videosLoaded}/${totalVideos}`;
             }
             
-            // 优化iOS视频播放设置
+            // 从缓存获取视频
+            function getCachedVideo(url) {
+                return videoCache.get(url);
+            }
+            
+            // 优化iOS视频播放
             function setupVideoForIOS(videoElement) {
                 if (isIOS) {
                     videoElement.setAttribute('playsinline', '');
@@ -1391,21 +1447,30 @@
                 }
             }
             
-            // 显示缓冲提示
-            function showBuffering() {
-                videoBuffering.classList.add('show');
-            }
-            
-            // 隐藏缓冲提示
-            function hideBuffering() {
-                videoBuffering.classList.remove('show');
-            }
-            
-            window.addEventListener('load', function() {
-                // 初始预加载前3个视频
-                preloadVideosBatch(0, 3).then(() => {
-                    console.log('初始视频预加载完成');
-                });
+            // 页面加载时开始预加载
+            window.addEventListener('load', async function() {
+                // 显示加载界面
+                loadingContainer.classList.remove('hidden');
+                
+                try {
+                    // 预加载所有视频
+                    await preloadAllVideos();
+                    
+                    // 隐藏加载界面
+                    setTimeout(() => {
+                        loadingContainer.classList.add('hidden');
+                        console.log('所有视频已预加载完成，可以开始播放');
+                        
+                        // 显示说明文字
+                        instructions.style.opacity = '1';
+                    }, 500);
+                    
+                } catch (error) {
+                    console.log('视频预加载过程中出错:', error);
+                    // 即使出错也继续
+                    loadingContainer.classList.add('hidden');
+                    instructions.style.opacity = '1';
+                }
                 
                 // 设置iOS视频属性
                 setupVideoForIOS(videoPlayer);
@@ -1478,7 +1543,7 @@
          
                 setTimeout(function() {
                     playNextVideo();
-                }, 1000); // 缩短等待时间
+                }, 1000);
             });
             
             cancelBtn.addEventListener('click', function() {
@@ -1491,138 +1556,96 @@
                 }, 2000);
             });
             
-            async function playNextVideo() {
-                if (currentVideoIndex >= videoUrls.length) {
-                    handleAllVideosPlayed();
-                    return;
-                }
-                
-                const videoUrl = videoUrls[currentVideoIndex];
-                console.log('准备播放视频:', currentVideoIndex, videoUrl);
-                
-                try {
-                    // 暂停当前视频
+            function playNextVideo() {
+                if (currentVideoIndex < videoUrls.length) {
+                    const videoUrl = videoUrls[currentVideoIndex];
+                    console.log('播放视频:', currentVideoIndex + 1, videoUrl);
+                    
+                    // 暂停当前视频并重置
                     videoPlayer.pause();
                     videoPlayer.currentTime = 0;
                     
-                    // 显示缓冲提示
-                    showBuffering();
-                    
-                    // 显示视频容器
-                    videoContainer.classList.add('show');
-                    
-                    // 检查是否已预加载
-                    let cachedVideo = videoCache.get(videoUrl);
-                    
-                    if (!cachedVideo) {
-                        // 如果没有预加载，立即加载
-                        console.log('视频未预加载，开始加载:', videoUrl);
-                        cachedVideo = await preloadVideo(videoUrl);
+                    // 从缓存获取视频
+                    const cachedVideo = getCachedVideo(videoUrl);
+                    if (cachedVideo) {
+                        console.log('使用缓存的视频');
+                        videoPlayer.src = videoUrl;
+                    } else {
+                        videoPlayer.src = videoUrl;
                     }
                     
-                    // 设置视频源
-                    videoPlayer.src = videoUrl;
+                    videoContainer.classList.add('show');
                     
                     // iOS优化
                     setupVideoForIOS(videoPlayer);
                     
-                    // 设置事件监听器（使用一次性监听器避免重复绑定）
-                    const onCanPlay = () => {
-                        console.log('视频可以播放:', videoUrl);
-                        hideBuffering();
-                        videoPlayer.play().catch(error => {
+                    // 清除之前的事件监听器
+                    const newVideoPlayer = videoPlayer.cloneNode(true);
+                    videoPlayer.parentNode.replaceChild(newVideoPlayer, videoPlayer);
+                    
+                    // 重新获取videoPlayer引用
+                    const currentVideoPlayer = newVideoPlayer;
+                    
+                    // 设置事件监听器
+                    currentVideoPlayer.addEventListener('canplay', function() {
+                        console.log('视频可以播放，开始播放:', videoUrl);
+                        currentVideoPlayer.play().catch(function(error) {
                             console.log('视频播放失败:', error);
                             handleVideoError();
                         });
-                    };
+                    }, { once: true });
                     
-                    const onPlaying = () => {
+                    currentVideoPlayer.addEventListener('play', function() {
                         console.log('视频开始播放:', videoUrl);
-                        hideBuffering();
                         if (audioInitialized) {
                             backgroundMusic.volume = 0.08;
                             playAudio(backgroundMusic);
                         }
-                    };
+                    });
                     
-                    const onEnded = () => {
-                        console.log('视频播放结束:', videoUrl);
-                        videoPlayer.removeEventListener('canplay', onCanPlay);
-                        videoPlayer.removeEventListener('playing', onPlaying);
-                        videoPlayer.removeEventListener('ended', onEnded);
-                        videoPlayer.removeEventListener('error', onError);
-                        videoPlayer.removeEventListener('waiting', onWaiting);
-                        
-                        // 预加载下一个视频
-                        preloadNextVideo();
-                        
-                        // 播放下一个视频
-                        currentVideoIndex++;
-                        setTimeout(playNextVideo, 300); // 缩短视频间间隔
-                    };
+                    currentVideoPlayer.addEventListener('ended', function() {
+                        console.log('视频正常播放结束:', videoUrl);
+                        handleVideoEnd();
+                    }, { once: true });
                     
-                    const onError = (error) => {
-                        console.log('视频播放错误:', videoUrl, error);
-                        hideBuffering();
-                        videoPlayer.removeEventListener('canplay', onCanPlay);
-                        videoPlayer.removeEventListener('playing', onPlaying);
-                        videoPlayer.removeEventListener('ended', onEnded);
-                        videoPlayer.removeEventListener('error', onError);
-                        videoPlayer.removeEventListener('waiting', onWaiting);
+                    currentVideoPlayer.addEventListener('error', function() {
+                        console.log('视频加载错误:', videoUrl);
                         handleVideoError();
-                    };
-                    
-                    const onWaiting = () => {
-                        console.log('视频缓冲中...');
-                        showBuffering();
-                    };
-                    
-                    videoPlayer.addEventListener('canplay', onCanPlay, { once: true });
-                    videoPlayer.addEventListener('playing', onPlaying, { once: true });
-                    videoPlayer.addEventListener('ended', onEnded, { once: true });
-                    videoPlayer.addEventListener('error', onError, { once: true });
-                    videoPlayer.addEventListener('waiting', onWaiting);
-                    
-                    // 设置加载超时
-                    const loadTimeout = setTimeout(() => {
-                        if (videoPlayer.readyState < 2) { // HAVE_CURRENT_DATA
-                            console.log('视频加载超时');
-                            onError(new Error('加载超时'));
-                        }
-                    }, 10000); // 10秒超时
-                    
-                    videoPlayer.addEventListener('loadeddata', () => {
-                        clearTimeout(loadTimeout);
                     }, { once: true });
                     
                     // 开始加载视频
-                    videoPlayer.load();
+                    currentVideoPlayer.load();
                     
-                } catch (error) {
-                    console.log('播放视频时出错:', error);
-                    hideBuffering();
-                    handleVideoError();
                 }
             }
             
-            function handleVideoError() {
-                console.log('处理视频错误，跳过当前视频');
-                hideBuffering();
+            function handleVideoEnd() {
                 currentVideoIndex++;
                 if (currentVideoIndex < videoUrls.length) {
                     backgroundMusic.volume = 0.08;
                     setTimeout(playNextVideo, 300);
                 } else {
-                    handleAllVideosPlayed();
+                    videoContainer.classList.remove('show');
+                    backgroundMusic.volume = 0.08;
+                    setTimeout(function() {
+                        showVideoCall();
+                    }, 500);
                 }
             }
             
-            function handleAllVideosPlayed() {
-                videoContainer.classList.remove('show');
-                backgroundMusic.volume = 0.08;
-                setTimeout(function() {
-                    showVideoCall();
-                }, 500); // 缩短等待时间
+            function handleVideoError() {
+                console.log('视频播放出错，跳过当前视频');
+                currentVideoIndex++;
+                if (currentVideoIndex < videoUrls.length) {
+                    backgroundMusic.volume = 0.08;
+                    setTimeout(playNextVideo, 300);
+                } else {
+                    videoContainer.classList.remove('show');
+                    backgroundMusic.volume = 0.08;
+                    setTimeout(function() {
+                        showVideoCall();
+                    }, 500);
+                }
             }
             
             function showVideoCall() {
@@ -1647,148 +1670,140 @@
                     backgroundMusic.volume = 0.08;
                     playAudio(backgroundMusic);
                     playNextSpecialVideo();
-                }, 500); // 缩短等待时间
+                }, 500);
             }
             
-            async function playNextSpecialVideo() {
-                if (currentSpecialVideoIndex >= specialVideoUrls.length) {
-                    handleAllSpecialVideosPlayed();
-                    return;
-                }
-                
-                const videoUrl = specialVideoUrls[currentSpecialVideoIndex];
-                console.log('准备播放特殊视频:', currentSpecialVideoIndex, videoUrl);
-                
-                try {
-                    // 暂停当前视频
+            function playNextSpecialVideo() {
+                if (currentSpecialVideoIndex < specialVideoUrls.length) {
+                    const videoUrl = specialVideoUrls[currentSpecialVideoIndex];
+                    console.log('播放特殊视频:', currentSpecialVideoIndex + 1, videoUrl);
+                    
+                    // 暂停当前视频并重置
                     lightVideoPlayer.pause();
                     lightVideoPlayer.currentTime = 0;
                     
-                    // 显示缓冲提示
-                    showBuffering();
-                    
-                    // 显示视频容器
-                    lightVideoContainer.classList.add('show');
-                    
-                    // 检查是否已预加载
-                    let cachedVideo = videoCache.get(videoUrl);
-                    
-                    if (!cachedVideo) {
-                        // 如果没有预加载，立即加载
-                        console.log('特殊视频未预加载，开始加载:', videoUrl);
-                        cachedVideo = await preloadVideo(videoUrl);
+                    // 从缓存获取视频
+                    const cachedVideo = getCachedVideo(videoUrl);
+                    if (cachedVideo) {
+                        console.log('使用缓存的特殊视频');
+                        lightVideoPlayer.src = videoUrl;
+                    } else {
+                        lightVideoPlayer.src = videoUrl;
                     }
                     
-                    // 设置视频源
-                    lightVideoPlayer.src = videoUrl;
+                    lightVideoContainer.classList.add('show');
                     
                     // iOS优化
                     setupVideoForIOS(lightVideoPlayer);
                     
+                    // 清除之前的事件监听器
+                    const newVideoPlayer = lightVideoPlayer.cloneNode(true);
+                    lightVideoPlayer.parentNode.replaceChild(newVideoPlayer, lightVideoPlayer);
+                    
+                    // 重新获取lightVideoPlayer引用
+                    const currentLightVideoPlayer = newVideoPlayer;
+                    
                     // 设置事件监听器
-                    const onCanPlay = () => {
-                        console.log('特殊视频可以播放:', videoUrl);
-                        hideBuffering();
-                        lightVideoPlayer.play().catch(error => {
+                    currentLightVideoPlayer.addEventListener('canplay', function() {
+                        console.log('特殊视频可以播放，开始播放:', videoUrl);
+                        currentLightVideoPlayer.play().catch(function(error) {
                             console.log('特殊视频播放失败:', error);
                             handleSpecialVideoError();
                         });
-                    };
+                    }, { once: true });
                     
-                    const onPlaying = () => {
+                    currentLightVideoPlayer.addEventListener('play', function() {
                         console.log('特殊视频开始播放:', videoUrl);
-                        hideBuffering();
                         if (audioInitialized) {
                             backgroundMusic.volume = 0.08;
                             playAudio(backgroundMusic);
                         }
-                    };
+                    });
                     
-                    const onEnded = () => {
-                        console.log('特殊视频播放结束:', videoUrl);
-                        lightVideoPlayer.removeEventListener('canplay', onCanPlay);
-                        lightVideoPlayer.removeEventListener('playing', onPlaying);
-                        lightVideoPlayer.removeEventListener('ended', onEnded);
-                        lightVideoPlayer.removeEventListener('error', onError);
-                        
-                        currentSpecialVideoIndex++;
-                        if (currentSpecialVideoIndex < specialVideoUrls.length) {
-                            setTimeout(playNextSpecialVideo, 300);
-                        } else {
-                            handleAllSpecialVideosPlayed();
-                        }
-                    };
+                    currentLightVideoPlayer.addEventListener('ended', function() {
+                        console.log('特殊视频正常播放结束:', videoUrl);
+                        handleSpecialVideoEnd();
+                    }, { once: true });
                     
-                    const onError = (error) => {
-                        console.log('特殊视频播放错误:', videoUrl, error);
-                        hideBuffering();
-                        lightVideoPlayer.removeEventListener('canplay', onCanPlay);
-                        lightVideoPlayer.removeEventListener('playing', onPlaying);
-                        lightVideoPlayer.removeEventListener('ended', onEnded);
-                        lightVideoPlayer.removeEventListener('error', onError);
+                    currentLightVideoPlayer.addEventListener('error', function() {
+                        console.log('特殊视频加载错误:', videoUrl);
                         handleSpecialVideoError();
-                    };
-                    
-                    lightVideoPlayer.addEventListener('canplay', onCanPlay, { once: true });
-                    lightVideoPlayer.addEventListener('playing', onPlaying, { once: true });
-                    lightVideoPlayer.addEventListener('ended', onEnded, { once: true });
-                    lightVideoPlayer.addEventListener('error', onError, { once: true });
-                    
-                    // 设置加载超时
-                    const loadTimeout = setTimeout(() => {
-                        if (lightVideoPlayer.readyState < 2) {
-                            console.log('特殊视频加载超时');
-                            onError(new Error('加载超时'));
-                        }
-                    }, 10000);
-                    
-                    lightVideoPlayer.addEventListener('loadeddata', () => {
-                        clearTimeout(loadTimeout);
                     }, { once: true });
                     
                     // 开始加载视频
-                    lightVideoPlayer.load();
+                    currentLightVideoPlayer.load();
                     
-                } catch (error) {
-                    console.log('播放特殊视频时出错:', error);
-                    hideBuffering();
-                    handleSpecialVideoError();
+                } else {
+                    console.log('所有特殊视频播放完毕，显示结束消息和生日蛋糕');
+                    lightVideoContainer.classList.remove('show');
+                    backgroundMusic.volume = 0.08;
+                    
+                    setTimeout(function() {
+                        blackOverlay.classList.add('show');
+                        
+                        setTimeout(function() {
+                            endMessage1.classList.add('show');
+                            
+                            setTimeout(function() {
+                                endMessage2.classList.add('show');
+                               
+                                setTimeout(function() {
+                                    showBirthdayCake();
+                                }, 1500);
+                                
+                            }, 1500);
+                            
+                        }, 1500);
+                        
+                    }, 500);
                 }
             }
             
-            function handleSpecialVideoError() {
-                console.log('处理特殊视频错误，跳过当前视频');
+            function handleSpecialVideoEnd() {
                 currentSpecialVideoIndex++;
                 if (currentSpecialVideoIndex < specialVideoUrls.length) {
                     backgroundMusic.volume = 0.08;
                     setTimeout(playNextSpecialVideo, 300);
                 } else {
-                    handleAllSpecialVideosPlayed();
+                    lightVideoContainer.classList.remove('show');
+                    backgroundMusic.volume = 0.08;
+                    setTimeout(function() {
+                        blackOverlay.classList.add('show');
+                        setTimeout(function() {
+                            endMessage1.classList.add('show');
+                            setTimeout(function() {
+                                endMessage2.classList.add('show');
+                                setTimeout(function() {
+                                    showBirthdayCake();
+                                }, 1500);
+                            }, 1500);
+                        }, 1500);
+                    }, 500);
                 }
             }
             
-            function handleAllSpecialVideosPlayed() {
-                lightVideoContainer.classList.remove('show');
-                backgroundMusic.volume = 0.08;
-                
-                setTimeout(function() {
-                    blackOverlay.classList.add('show');
-                    
+            function handleSpecialVideoError() {
+                console.log('特殊视频播放出错，跳过当前视频');
+                currentSpecialVideoIndex++;
+                if (currentSpecialVideoIndex < specialVideoUrls.length) {
+                    backgroundMusic.volume = 0.08;
+                    setTimeout(playNextSpecialVideo, 300);
+                } else {
+                    lightVideoContainer.classList.remove('show');
+                    backgroundMusic.volume = 0.08;
                     setTimeout(function() {
-                        endMessage1.classList.add('show');
-                        
+                        blackOverlay.classList.add('show');
                         setTimeout(function() {
-                            endMessage2.classList.add('show');
-                           
+                            endMessage1.classList.add('show');
                             setTimeout(function() {
-                                showBirthdayCake();
-                            }, 1500); // 缩短等待时间
-                            
-                        }, 1500); // 缩短等待时间
-                        
-                    }, 1500); // 缩短等待时间
-                    
-                }, 500); // 缩短等待时间
+                                endMessage2.classList.add('show');
+                                setTimeout(function() {
+                                    showBirthdayCake();
+                                }, 1500);
+                            }, 1500);
+                        }, 1500);
+                    }, 500);
+                }
             }
             
             answerBtn.addEventListener('click', answerVideoCall);
@@ -1804,7 +1819,7 @@
                 
                 setTimeout(function() {
                     cakeInstruction.classList.add('show');
-                }, 800); // 缩短等待时间
+                }, 800);
             }
             
             function createCakeDecorations() {
@@ -1879,27 +1894,6 @@
                     animation.onfinish = () => confetti.remove();
                 }
             }
-            
-            // 监听页面可见性变化，优化后台时的资源使用
-            document.addEventListener('visibilitychange', function() {
-                if (document.hidden) {
-                    // 页面不可见时，暂停视频和音频
-                    videoPlayer.pause();
-                    lightVideoPlayer.pause();
-                    backgroundMusic.pause();
-                } else {
-                    // 页面重新可见时，恢复播放
-                    if (videoContainer.classList.contains('show') && !videoPlayer.paused) {
-                        videoPlayer.play().catch(console.error);
-                    }
-                    if (lightVideoContainer.classList.contains('show') && !lightVideoPlayer.paused) {
-                        lightVideoPlayer.play().catch(console.error);
-                    }
-                    if (audioInitialized) {
-                        backgroundMusic.play().catch(console.error);
-                    }
-                }
-            });
         });
     </script>
 </body>
