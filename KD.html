@@ -907,13 +907,13 @@
                         <div class="param-group">
                             <label class="param-label" for="eps">邻域半径 (eps)</label>
                             <input type="number" class="param-input" id="eps" step="0.1" value="0.5" placeholder="留空则自动估算">
-                            <small style="color: #7f8c8d; display: block; margin-top: 5px;">自动估算基于K近邻距离的75%分位数</small>
+                            <small style="color: #7f8c8d; display: block; margin-top: 5px;">留空则自动使用k-距离图法估算最优eps值</small>
                         </div>
                         
                         <div class="param-group">
                             <label class="param-label" for="minSamples">核心点最小样本数</label>
                             <input type="number" class="param-input" id="minSamples" value="5" placeholder="留空则自动估算">
-                            <small style="color: #7f8c8d; display: block; margin-top: 5px;">自动估算为max(3, 特征数)</small>
+                            <small style="color: #7f8c8d; display: block; margin-top: 5px;">留空则自动估算为max(3, 特征数+1)</small>
                         </div>
                         
                         <div class="param-group">
@@ -921,6 +921,13 @@
                                 <input type="checkbox" id="forceTwoClusters" checked> 强制二分类输出
                             </label>
                             <small style="color: #7f8c8d; display: block; margin-top: 5px;">强制将结果转换为两个主要聚类</small>
+                        </div>
+                        
+                        <div class="param-group">
+                            <label class="param-label">
+                                <input type="checkbox" id="optimizeParams" checked> 自动优化参数
+                            </label>
+                            <small style="color: #7f8c8d; display: block; margin-top: 5px;">自动调整参数以减少噪声误判</small>
                         </div>
                     </div>
                     
@@ -1235,6 +1242,7 @@
                     displayLabelColumnSelector();
                     
                     dataPreviewContainer.style.display = 'block';
+
                     executeSingleBtn.disabled = false;
                     executeAllBtn.disabled = false;
                     
@@ -1747,10 +1755,9 @@
             }
             
             const epsInput = document.getElementById('eps').value;
-            const eps = epsInput ? parseFloat(epsInput) : 0.5;
             const minSamplesInput = document.getElementById('minSamples').value;
-            const minSamples = minSamplesInput ? parseInt(minSamplesInput) : 5;
             const forceTwoClusters = document.getElementById('forceTwoClusters').checked;
+            const optimizeParams = document.getElementById('optimizeParams').checked;
             const labelColumn = labelColumnSelect.value || null;
             
             if (!isParallel) {
@@ -1798,7 +1805,22 @@
                 
                 addLog(`有效数据点: ${X_data.length}/${currentData.length} (过滤了${currentData.length - X_data.length}个无效数据点)`);
                 
-                const result = await runDBSCANJavaScript(X_data, eps, minSamples, forceTwoClusters, validDataIndices);
+                // 自动确定参数
+                let eps = epsInput ? parseFloat(epsInput) : null;
+                let minSamples = minSamplesInput ? parseInt(minSamplesInput) : null;
+                
+                // 如果开启了自动优化参数或参数为空，则自动确定参数
+                if (optimizeParams || eps === null || minSamples === null) {
+                    addLog('正在自动确定DBSCAN最优参数...');
+                    const { optimalEps, optimalMinSamples } = estimateDBSCANParameters(X_data, selectedFeatures.length);
+                    
+                    if (eps === null) eps = optimalEps;
+                    if (minSamples === null) minSamples = optimalMinSamples;
+                    
+                    addLog(`自动确定参数: eps=${eps.toFixed(4)}, min_samples=${minSamples}`);
+                }
+                
+                const result = await runDBSCANJavaScript(X_data, eps, minSamples, forceTwoClusters, optimizeParams, validDataIndices);
                 
                 dbscanResult = result;
                 displayDBSCANResults(result);
@@ -1822,35 +1844,117 @@
             }
         }
         
-        // JavaScript实现的DBSCAN算法 - 严格按照伪代码
-        function runDBSCANJavaScript(X, eps, minSamples, forceTwoClusters, validDataIndices) {
+        // 自动估计DBSCAN参数（基于k-距离图法）
+        function estimateDBSCANParameters(X, n_features) {
+            const m = X.length;
+            if (m < 10) {
+                return { optimalEps: 0.5, optimalMinSamples: Math.max(3, n_features + 1) };
+            }
+            
+            // 1. 确定min_samples的合理值
+            // 一般规则：min_samples = 维度 + 1，但至少为3
+            const minSamples = Math.max(3, n_features + 1);
+            
+            // 2. 使用k-距离图法确定eps
+            // 计算每个点到第k近邻的距离
+            const k = Math.min(minSamples, m - 1);
+            const distances = [];
+            
+            for (let i = 0; i < m; i++) {
+                const pointDistances = [];
+                for (let j = 0; j < m; j++) {
+                    if (i === j) continue;
+                    
+                    // 计算欧氏距离
+                    let dist = 0;
+                    for (let d = 0; d < n_features; d++) {
+                        dist += (X[i][d] - X[j][d]) ** 2;
+                    }
+                    dist = Math.sqrt(dist);
+                    pointDistances.push(dist);
+                }
+                
+                // 排序并获取第k小的距离
+                pointDistances.sort((a, b) => a - b);
+                distances.push(pointDistances[k - 1]);
+            }
+            
+            // 排序距离
+            distances.sort((a, b) => a - b);
+            
+            // 寻找"拐点" - 距离变化最大的点
+            let maxChange = 0;
+            let optimalIndex = Math.floor(distances.length * 0.75); // 默认使用75%分位数
+            
+            // 寻找斜率变化最大的点
+            for (let i = 1; i < distances.length - 1; i++) {
+                const prevDiff = distances[i] - distances[i-1];
+                const nextDiff = distances[i+1] - distances[i];
+                const change = nextDiff - prevDiff;
+                
+                if (change > maxChange && i > distances.length * 0.1) {
+                    maxChange = change;
+                    optimalIndex = i;
+                }
+            }
+            
+            // 使用拐点处的距离作为eps
+            let optimalEps = distances[optimalIndex];
+            
+            // 确保eps不太小也不太大
+            if (optimalEps < 0.1) optimalEps = 0.1;
+            if (optimalEps > 10) optimalEps = 10;
+            
+            // 如果数据量很大，可以稍微增大eps
+            if (m > 1000) {
+                optimalEps *= 1.2;
+            }
+            
+            return { optimalEps, optimalMinSamples: minSamples };
+        }
+        
+        // JavaScript实现的DBSCAN算法 - 改进版（修复版）
+        function runDBSCANJavaScript(X, eps, minSamples, forceTwoClusters, optimizeParams, validDataIndices) {
             return new Promise((resolve) => {
                 const m = X.length; // 样本数
-                const labels = new Array(m).fill(-1); // 初始化所有样本标签为-1（未访问/噪声）
+                let labels = new Array(m).fill(-1); // 改为let声明，可以重新赋值
                 let cluster_id = 0; // 聚类ID从0开始
                 const visited = new Array(m).fill(false); // 标记样本是否已访问
                 
-                // 1. 初始化核心对象集合
-                let coreObjects = [];
+                // 预计算距离矩阵以提高性能（对于小型数据集）
+                let distanceMatrix = null;
+                if (m <= 1000) {
+                    distanceMatrix = precomputeDistances(X);
+                }
                 
-                // 2. 确定核心对象
+                // 1. 确定核心对象
+                const coreObjects = [];
+                const pointNeighbors = new Array(m).fill().map(() => []);
+                
                 for (let j = 0; j < m; j++) {
-                    // 计算样本的ε-邻域
+                    // 获取样本的ε-邻域
                     const neighbors = [];
                     for (let i = 0; i < m; i++) {
                         if (i === j) continue;
                         
                         // 计算欧氏距离
-                        let dist = 0;
-                        for (let d = 0; d < X[0].length; d++) {
-                            dist += (X[j][d] - X[i][d]) ** 2;
+                        let dist;
+                        if (distanceMatrix) {
+                            dist = distanceMatrix[j][i];
+                        } else {
+                            dist = 0;
+                            for (let d = 0; d < X[0].length; d++) {
+                                dist += (X[j][d] - X[i][d]) ** 2;
+                            }
+                            dist = Math.sqrt(dist);
                         }
-                        dist = Math.sqrt(dist);
                         
                         if (dist <= eps) {
                             neighbors.push(i);
                         }
                     }
+                    
+                    pointNeighbors[j] = neighbors;
                     
                     // 如果邻域内的样本数大于等于minSamples，则为核心对象
                     if (neighbors.length >= minSamples) {
@@ -1858,10 +1962,7 @@
                     }
                 }
                 
-                // 3. 初始化未访问样本集合
-                let unvisited = [...Array(m).keys()]; // [0, 1, 2, ..., m-1]
-                
-                // 4. 开始聚类
+                // 2. 开始聚类
                 while (coreObjects.length > 0) {
                     // 随机选择一个核心对象
                     const randomIndex = Math.floor(Math.random() * coreObjects.length);
@@ -1875,43 +1976,21 @@
                     
                     // 标记为已访问
                     visited[coreObject] = true;
-                    const indexInUnvisited = unvisited.indexOf(coreObject);
-                    if (indexInUnvisited !== -1) {
-                        unvisited.splice(indexInUnvisited, 1);
-                    }
                     
                     // 初始化队列
                     const queue = [coreObject];
+                    labels[coreObject] = cluster_id;
                     
                     // 开始扩展聚类
                     while (queue.length > 0) {
                         const currentPoint = queue.shift();
-                        
-                        // 获取当前点的ε-邻域
-                        const currentNeighbors = [];
-                        for (let i = 0; i < m; i++) {
-                            if (i === currentPoint) continue;
-                            
-                            let dist = 0;
-                            for (let d = 0; d < X[0].length; d++) {
-                                dist += (X[currentPoint][d] - X[i][d]) ** 2;
-                            }
-                            dist = Math.sqrt(dist);
-                            
-                            if (dist <= eps) {
-                                currentNeighbors.push(i);
-                            }
-                        }
+                        const currentNeighbors = pointNeighbors[currentPoint];
                         
                         // 如果当前点是核心对象
                         if (currentNeighbors.length >= minSamples) {
                             for (let neighbor of currentNeighbors) {
                                 if (!visited[neighbor]) {
                                     visited[neighbor] = true;
-                                    const idx = unvisited.indexOf(neighbor);
-                                    if (idx !== -1) {
-                                        unvisited.splice(idx, 1);
-                                    }
                                     queue.push(neighbor);
                                 }
                                 
@@ -1923,62 +2002,44 @@
                     }
                     
                     // 从核心对象集合中移除当前聚类中的点
-                    coreObjects = coreObjects.filter(obj => labels[obj] === -1);
+                    for (let i = coreObjects.length - 1; i >= 0; i--) {
+                        if (labels[coreObjects[i]] !== -1) {
+                            coreObjects.splice(i, 1);
+                        }
+                    }
                     
                     cluster_id++;
                 }
                 
-                // 强制二分类
-                if (forceTwoClusters && cluster_id > 2) {
-                    // 统计每个聚类的样本数
-                    const clusterCounts = {};
-                    for (let label of labels) {
-                        if (label !== -1) {
-                            clusterCounts[label] = (clusterCounts[label] || 0) + 1;
-                        }
-                    }
-                    
-                    // 只保留两个最大的聚类
-                    const sortedClusters = Object.entries(clusterCounts)
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 2);
-                    
-                    // 重新分配标签
-                    const labelMap = {};
-                    sortedClusters.forEach(([clusterId], index) => {
-                        labelMap[clusterId] = index;
-                    });
-                    
-                    for (let i = 0; i < labels.length; i++) {
-                        if (labels[i] !== -1 && labelMap[labels[i]] !== undefined) {
-                            labels[i] = labelMap[labels[i]];
-                        } else if (labels[i] !== -1) {
-                            // 将其他聚类的点分配到最近的聚类
-                            labels[i] = 0; // 默认分配到第一个聚类
-                        }
-                    }
-                    
-                    cluster_id = 2;
+                // 3. 后处理：减少噪声误判
+                let processedLabels = [...labels]; // 创建副本
+                if (optimizeParams) {
+                    processedLabels = postProcessDBSCAN(processedLabels, pointNeighbors, eps, minSamples);
                 }
                 
-                // 计算聚类中心点
-                const centroids = calculateDBSCANCentroids(X, labels);
+                // 4. 强制二分类
+                if (forceTwoClusters && cluster_id > 2) {
+                    processedLabels = forceTwoClustersDBSCAN(processedLabels);
+                }
                 
-                // 计算PRF1指标
-                const prf1Metrics = calculatePRF1ForDBSCAN(labels);
+                // 5. 计算聚类中心点
+                const centroids = calculateDBSCANCentroids(X, processedLabels);
+                
+                // 6. 计算PRF1指标
+                const prf1Metrics = calculatePRF1ForDBSCAN(processedLabels);
                 
                 const result = {
                     success: true,
                     algorithm: 'dbscan',
                     X: X,
-                    labels: labels,
+                    labels: processedLabels, // 使用处理后的标签
                     centroids: centroids,
                     features: getSelectedFeatures(),
                     n_samples: X.length,
                     n_features: X[0].length,
                     eps: eps,
                     min_samples: minSamples,
-                    noise_count: labels.filter(l => l === -1).length,
+                    noise_count: processedLabels.filter(l => l === -1).length,
                     prf1: prf1Metrics,
                     invalid_data_count: currentData.length - X.length,
                     validDataIndices: validDataIndices
@@ -1986,6 +2047,160 @@
                 
                 resolve(result);
             });
+        }
+        
+        // 预计算距离矩阵
+        function precomputeDistances(X) {
+            const m = X.length;
+            const n = X[0].length;
+            const distances = new Array(m).fill().map(() => new Array(m).fill(0));
+            
+            for (let i = 0; i < m; i++) {
+                for (let j = i + 1; j < m; j++) {
+                    let dist = 0;
+                    for (let d = 0; d < n; d++) {
+                        dist += (X[i][d] - X[j][d]) ** 2;
+                    }
+                    dist = Math.sqrt(dist);
+                    distances[i][j] = dist;
+                    distances[j][i] = dist;
+                }
+            }
+            
+            return distances;
+        }
+        
+        // DBSCAN后处理：减少噪声误判
+        function postProcessDBSCAN(labels, pointNeighbors, eps, minSamples) {
+            const m = labels.length;
+            const newLabels = [...labels];
+            
+            // 尝试重新分配噪声点到最近的聚类
+            for (let i = 0; i < m; i++) {
+                if (newLabels[i] === -1) {
+                    // 找到该点的所有邻居
+                    const neighbors = pointNeighbors[i];
+                    
+                    // 统计邻居的标签分布
+                    const labelCounts = {};
+                    for (let neighbor of neighbors) {
+                        if (newLabels[neighbor] !== -1) {
+                            const label = newLabels[neighbor];
+                            labelCounts[label] = (labelCounts[label] || 0) + 1;
+                        }
+                    }
+                    
+                    // 如果有足够多的邻居属于同一个聚类，则将该点分配到这个聚类
+                    if (Object.keys(labelCounts).length > 0) {
+                        const maxLabel = Object.keys(labelCounts).reduce((a, b) => 
+                            labelCounts[a] > labelCounts[b] ? a : b
+                        );
+                        
+                        if (labelCounts[maxLabel] >= Math.floor(minSamples / 2)) {
+                            newLabels[i] = parseInt(maxLabel);
+                        }
+                    }
+                }
+            }
+            
+            // 合并小的聚类
+            const labelSizes = {};
+            for (let label of newLabels) {
+                if (label !== -1) {
+                    labelSizes[label] = (labelSizes[label] || 0) + 1;
+                }
+            }
+            
+            // 合并非常小的聚类到最近的聚类
+            const smallClusters = Object.entries(labelSizes)
+                .filter(([label, size]) => size < minSamples)
+                .map(([label]) => parseInt(label));
+                
+            for (let smallCluster of smallClusters) {
+                // 找到这个聚类的点
+                const clusterPoints = [];
+                for (let i = 0; i < m; i++) {
+                    if (newLabels[i] === smallCluster) {
+                        clusterPoints.push(i);
+                    }
+                }
+                
+                // 为每个点找到最近的聚类
+                for (let pointIdx of clusterPoints) {
+                    const neighbors = pointNeighbors[pointIdx];
+                    const neighborLabels = {};
+                    
+                    for (let neighbor of neighbors) {
+                        if (newLabels[neighbor] !== -1 && newLabels[neighbor] !== smallCluster) {
+                            const label = newLabels[neighbor];
+                            neighborLabels[label] = (neighborLabels[label] || 0) + 1;
+                        }
+                    }
+                    
+                    if (Object.keys(neighborLabels).length > 0) {
+                        const bestLabel = Object.keys(neighborLabels).reduce((a, b) => 
+                            neighborLabels[a] > neighborLabels[b] ? a : b
+                        );
+                        newLabels[pointIdx] = parseInt(bestLabel);
+                    }
+                }
+            }
+            
+            // 重新编号标签
+            const uniqueLabels = [...new Set(newLabels.filter(l => l !== -1))];
+            const labelMap = {};
+            uniqueLabels.forEach((label, index) => {
+                labelMap[label] = index;
+            });
+            
+            for (let i = 0; i < m; i++) {
+                if (newLabels[i] !== -1) {
+                    newLabels[i] = labelMap[newLabels[i]];
+                }
+            }
+            
+            return newLabels;
+        }
+        
+        // 强制DBSCAN二分类
+        function forceTwoClustersDBSCAN(labels) {
+            const m = labels.length;
+            const newLabels = [...labels];
+            
+            // 统计每个聚类的样本数
+            const clusterCounts = {};
+            for (let label of newLabels) {
+                if (label !== -1) {
+                    clusterCounts[label] = (clusterCounts[label] || 0) + 1;
+                }
+            }
+            
+            // 如果聚类数小于等于2，直接返回
+            if (Object.keys(clusterCounts).length <= 2) {
+                return newLabels;
+            }
+            
+            // 只保留两个最大的聚类
+            const sortedClusters = Object.entries(clusterCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 2);
+            
+            // 重新分配标签
+            const labelMap = {};
+            sortedClusters.forEach(([clusterId], index) => {
+                labelMap[clusterId] = index;
+            });
+            
+            for (let i = 0; i < m; i++) {
+                if (newLabels[i] !== -1 && labelMap[newLabels[i]] !== undefined) {
+                    newLabels[i] = labelMap[newLabels[i]];
+                } else if (newLabels[i] !== -1) {
+                    // 将其他聚类的点分配到最近的聚类
+                    newLabels[i] = 0; // 默认分配到第一个聚类
+                }
+            }
+            
+            return newLabels;
         }
         
         // 计算DBSCAN的聚类中心点
@@ -2415,8 +2630,10 @@
             html += `<li>自动确定聚类数量</li>`;
             html += `<li>能发现任意形状的聚类</li>`;
             html += `<li>能识别并处理噪声点</li>`;
-            html += `<li>对参数eps和min_samples敏感</li>`;
+            html += `<li>支持自动参数优化</li>`;
+            html += `<li>减少噪声误判</li>`;
             html += `<li>适用于密度不均匀的数据</li>`;
+
             html += `<li>自动过滤无效数据</li>`;
             html += `</ul>`;
             html += `</div>`;
